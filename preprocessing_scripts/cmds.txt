@@ -1,0 +1,1 @@
+find clinics_temp -type f -exec cp {} clinic_files/
