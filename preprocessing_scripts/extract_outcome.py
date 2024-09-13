@@ -69,7 +69,7 @@ Classification Categories:
 Important Note: Focus only on potential upcoming surgeries as indicated in the consultation. Do not consider mentions of past surgeries. Choose 'More details required' if there’s ambiguity about the need for upcoming surgery or revision.
 
 Text of Medical Clinic Letter: {text}
-
+ 
 Based on the letter above, the outcome is (choose only one category):
 
 """
