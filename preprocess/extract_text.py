@@ -27,16 +27,17 @@ def extract_text_from_pdf(pdf_path):
         return ""
 
 def categorize_pdf(filename):
-    if re.search(r'c', filename, re.IGNORECASE):
+    if re.search(r'C\d+\.pdf$', filename, re.IGNORECASE):
         return 'C'
+    elif re.search(r'R\d+\.pdf$', filename, re.IGNORECASE):
+        return 'R'
     else:
-        return 'R'  # Default to 'R' if not explicitly 'C'
+        return 'Unknown'
 
 def process_hospital_folders(root_dir):
     print(f"Starting to process directory: {root_dir}")
     data = []
     folder_count = 0
-
     if not os.path.exists(root_dir):
         print(f"Error: The directory {root_dir} does not exist.")
         return pd.DataFrame()
@@ -51,9 +52,8 @@ def process_hospital_folders(root_dir):
         hospital_path = os.path.join(root_dir, hospital_folder)
         print(f"\nProcessing hospital folder {folder_count}/{total_folders}: {hospital_folder}")
         
-        c_texts = []
-        r_texts = []
-
+        c_texts = {}
+        r_texts = {}
         pdf_files = [f for f in os.listdir(hospital_path) if f.lower().endswith('.pdf')]
         print(f"PDF files found: {pdf_files}")
 
@@ -63,20 +63,32 @@ def process_hospital_folders(root_dir):
             extracted_text = extract_text_from_pdf(full_path)
             
             if category == 'C':
-                print(f"Processed 'C' file: {filename}")
-                c_texts.append(extracted_text)
+                match = re.search(r'C(\d+)\.pdf$', filename, re.IGNORECASE)
+                if match:
+                    number = match.group(1)
+                    c_texts[number] = extracted_text
+                    print(f"Processed 'C' file: {filename}")
+            elif category == 'R':
+                match = re.search(r'R(\d+)\.pdf$', filename, re.IGNORECASE)
+                if match:
+                    number = match.group(1)
+                    r_texts[number] = extracted_text
+                    print(f"Processed 'R' file: {filename}")
             else:
-                print(f"Processed 'R' file: {filename}")
-                r_texts.append(extracted_text)
+                print(f"Skipped unknown file type: {filename}")
 
-        data.append({
-            'Hospital Number': hospital_folder,
-            'Referrals (R)': '\n\n'.join(r_texts).strip(),
-            'Clinic (C)': '\n\n'.join(c_texts).strip()
-        })
+        # Create a row for each set of letters
+        all_set_numbers = sorted(set(c_texts.keys()) | set(r_texts.keys()))
+        for number in all_set_numbers:
+            data.append({
+                'Hospital Number': hospital_folder,
+                'Set Number': number,
+                'Referral (R)': r_texts.get(number, ''),
+                'Clinic (C)': c_texts.get(number, '')
+            })
+
         print(f"Added data for hospital number: {hospital_folder}")
-        print(f"Number of 'R' files combined: {len(r_texts)}")
-        print(f"Number of 'C' files combined: {len(c_texts)}")
+        print(f"Number of sets processed: {len(all_set_numbers)}")
 
         # Print progress
         if folder_count % 10 == 0:
@@ -88,14 +100,13 @@ def process_hospital_folders(root_dir):
     return pd.DataFrame(data)
 
 # Example usage
-root_directory = '/home/swleocresearch/Desktop/triage-ai/datasets/cleaned_and_sorted'
+root_directory = '/home/swleocresearch/Desktop/triage-ai/datasets/labelled_dataset'
 print(f"Starting script with root directory: {root_directory}")
 
 try:
     df = process_hospital_folders(root_directory)
-
     # Save the results to a CSV file
-    output_file = 'extracted_letters_text.csv'
+    output_file = '/home/swleocresearch/Desktop/triage-ai/datasets/csv/extracted_letters_text.csv'
     df.to_csv(output_file, index=False)
     print(f"Text extraction complete. Results saved to '{output_file}'")
     print(f"Total rows in the CSV: {len(df)}")
