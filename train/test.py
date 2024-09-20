@@ -1,9 +1,10 @@
 import pandas as pd 
 import numpy as np 
 import torch 
+import os 
 from transformers import AutoTokenizer, AutoModelForSequenceClassification, Trainer, TrainingArguments 
-from datasets import Dataset 
-from sklearn.metrics import accuracy_score, precision_recall_fscore_support 
+from datasets import Dataset, ClassLabel 
+from sklearn.metrics import accuracy_score, precision_recall_fscore_support, classification_report 
 from sklearn.model_selection import train_test_split 
 from transformers import pipeline 
 from tqdm import tqdm 
@@ -18,55 +19,105 @@ llama_pipeline = pipeline(
 ) 
 
 def extract_content(text): 
-    prompt = f""" 
-    Extract the most relevant clinical information from the following referral letter.  
-    Focus on key symptoms, diagnoses, and recommended actions. Summarize in about 200 words: 
+    # Split very long texts into chunks of 8000 characters 
+    chunks = [text[i:i+8000] for i in range(0, len(text), 8000)] 
+    summaries = [] 
 
-    {text}   
+    for chunk in chunks: 
+        prompt = f""" 
+        Extract the most relevant clinical information from the following part of a referral letter.  
+        Focus on key symptoms, diagnoses, and recommended actions. Summarize in about 100-150 words. 
+        Ensure the summary is complete and ends with a full stop: 
 
-    Summary: 
-    """ 
+        {chunk} 
 
-    output = llama_pipeline( 
-        prompt, 
-        max_new_tokens=250, 
-        do_sample=True, 
-        temperature=0.7, 
-        num_return_sequences=1 
-    ) 
+        Summary: 
+        """ 
 
-    return output[0]['generated_text'].split("Summary:")[-1].strip() 
+        output = llama_pipeline( 
+            prompt, 
+            max_new_tokens=300,  # Increased from 150 to 300 
+            do_sample=True, 
+            temperature=0.7, 
+            num_return_sequences=1 
+        ) 
 
-# Load and preprocess data 
-df = pd.read_csv('/home/swleocresearch/Desktop/triage-ai/datasets/triage_dataset.csv') 
-df = df[df['output'].isin(['surgery', 'discharge'])].reset_index(drop=True) 
+        summary = output[0]['generated_text'].split("Summary:")[-1].strip() 
+
+        # Ensure the summary ends with a complete sentence 
+        if not summary.endswith('.'): 
+            last_sentence = re.split(r'(?<=[.!?])\s+', summary)[-1] 
+            summary = summary[:summary.rfind(last_sentence)] 
+
+        summaries.append(summary) 
+
+    # Combine summaries if there were multiple chunks 
+    final_summary = " ".join(summaries) 
+
+    # If the combined summary is still too long, summarize it again 
+    if len(final_summary) > 1000: 
+        prompt = f""" 
+        Summarize the following extracted information in about 200-250 words. 
+        Ensure the summary is complete and ends with a full stop: 
+
+        {final_summary} 
+
+        Summary: 
+        """ 
+
+        output = llama_pipeline( 
+            prompt, 
+            max_new_tokens=400,  # Increased from 250 to 400 
+            do_sample=True, 
+            temperature=0.7, 
+            num_return_sequences=1 
+        ) 
+
+        final_summary = output[0]['generated_text'].split("Summary:")[-1].strip() 
+
+        # Ensure the final summary ends with a complete sentence 
+        if not final_summary.endswith('.'): 
+            last_sentence = re.split(r'(?<=[.!?])\s+', final_summary)[-1] 
+            final_summary = final_summary[:final_summary.rfind(last_sentence)] 
+
+    return final_summary  
+
+# File paths 
+input_csv_path = '/home/swleocresearch/Desktop/triage-ai/datasets/triage_dataset.csv' 
+summarized_csv_path = '/home/swleocresearch/Desktop/triage-ai/datasets/summarized_dataset.csv' 
+
+# Check if summarized dataset exists 
+if os.path.exists(summarized_csv_path): 
+    print("Loading pre-summarized dataset...") 
+    df = pd.read_csv(summarized_csv_path) 
+else: 
+    print("Summarized dataset not found. Processing original dataset...") 
+    # Load and preprocess data 
+    df = pd.read_csv(input_csv_path) 
+    df = df[df['output'].isin(['surgery', 'discharge'])].reset_index(drop=True) 
+
+    # Create label mapping 
+    label_mapping = {label: idx for idx, label in enumerate(df['output'].unique())} 
+    reverse_label_mapping = {v: k for k, v in label_mapping.items()} 
+
+    print("Extracting content from all letters...") 
+    df['extracted_content'] = df.iloc[:, 1].apply(lambda x: extract_content(x)) 
+
+    # Save the summarized dataset 
+    df.to_csv(summarized_csv_path, index=False) 
+    print(f"Summarized dataset saved to {summarized_csv_path}") 
 
 # Create label mapping 
 label_mapping = {label: idx for idx, label in enumerate(df['output'].unique())} 
 reverse_label_mapping = {v: k for k, v in label_mapping.items()} 
 
-print("Extracting content from all letters...") 
-extracted_contents = [] 
-for index, row in tqdm(df.iterrows(), total=df.shape[0]): 
-    original_text = row.iloc[1]  # Assuming the text is in the second column 
-    original_label = row['output'] 
-    print(f"\nProcessing Letter {index + 1}:") 
-    print(f"Original Label: {original_label}") 
-    print("Original Text:") 
-    print(original_text[:500] + "..." if len(original_text) > 500 else original_text) 
-
-    extracted = extract_content(original_text) 
-    extracted_contents.append(extracted) 
-
-    print("\nSummarized Text:") 
-    print(extracted) 
-    print("-" * 80) 
-
-df['extracted_content'] = extracted_contents   
-
 texts = df['extracted_content'].tolist() 
 labels = df['output'].tolist() 
 label_ids = [label_mapping[label] for label in labels] 
+
+# Split the data into train, validation, and test sets 
+train_texts, temp_texts, train_labels, temp_labels = train_test_split(texts, label_ids, test_size=0.3, stratify=label_ids, random_state=42) 
+val_texts, test_texts, val_labels, test_labels = train_test_split(temp_texts, temp_labels, test_size=0.5, stratify=temp_labels, random_state=42) 
 
 # BERT Tokenizer and Model 
 bert_tokenizer = AutoTokenizer.from_pretrained("emilyalsentzer/Bio_ClinicalBERT") 
@@ -75,18 +126,26 @@ bert_model = AutoModelForSequenceClassification.from_pretrained("emilyalsentzer/
 def tokenize_function(texts): 
     return bert_tokenizer(texts, padding="max_length", truncation=True, max_length=512) 
 
-# Tokenize all data 
-encodings = tokenize_function(texts) 
+# Tokenize data 
+train_encodings = tokenize_function(train_texts) 
+val_encodings = tokenize_function(val_texts) 
+test_encodings = tokenize_function(test_texts) 
 
-# Create dataset 
-dataset = Dataset.from_dict({ 
-    'input_ids': encodings['input_ids'], 
-    'attention_mask': encodings['attention_mask'], 
-    'label': label_ids 
-}) 
+# Create datasets with proper label format 
+def create_dataset(encodings, labels): 
+    dataset = Dataset.from_dict({ 
+        'input_ids': encodings['input_ids'], 
+        'attention_mask': encodings['attention_mask'], 
+        'label': labels 
+    }) 
 
-# Split the dataset 
-train_dataset, eval_dataset = dataset.train_test_split(test_size=0.2, stratify_by_column="label").values() 
+    # Convert label feature to ClassLabel 
+    dataset = dataset.cast_column('label', ClassLabel(num_classes=len(label_mapping), names=list(label_mapping.keys()))) 
+    return dataset 
+
+train_dataset = create_dataset(train_encodings, train_labels) 
+val_dataset = create_dataset(val_encodings, val_labels) 
+test_dataset = create_dataset(test_encodings, test_labels) 
 
 # Custom metric function 
 def compute_metrics(pred): 
@@ -94,7 +153,6 @@ def compute_metrics(pred):
     preds = pred.predictions.argmax(-1) 
     precision, recall, f1, _ = precision_recall_fscore_support(labels, preds, average='weighted') 
     acc = accuracy_score(labels, preds) 
-
     return { 
         "accuracy": acc, 
         "f1": f1, 
@@ -105,7 +163,7 @@ def compute_metrics(pred):
 # Training arguments 
 training_args = TrainingArguments( 
     output_dir='./results', 
-    evaluation_strategy="epoch", 
+    evaluation_strategy="epoch",
     learning_rate=2e-5, 
     per_device_train_batch_size=16, 
     per_device_eval_batch_size=16, 
@@ -122,38 +180,44 @@ trainer = Trainer(
     model=bert_model, 
     args=training_args, 
     train_dataset=train_dataset, 
-    eval_dataset=eval_dataset, 
+    eval_dataset=val_dataset, 
     compute_metrics=compute_metrics 
 ) 
 
 print("\nTraining the model...") 
 trainer.train() 
 
-# Evaluate 
-eval_results = trainer.evaluate() 
-print("Evaluation results:") 
-print(eval_results) 
+# Evaluate on validation set 
+print("\nEvaluating on validation set...") 
+val_results = trainer.evaluate() 
+print("Validation results:") 
+print(val_results) 
 
-# Predict on the entire dataset 
-print("\nMaking predictions on the entire dataset...") 
-predictions = trainer.predict(dataset) 
-predicted_labels = predictions.predictions.argmax(-1) 
+# Predict on test set 
+print("\nPredicting on test set...") 
+test_predictions = trainer.predict(test_dataset) 
+test_preds = test_predictions.predictions.argmax(-1) 
 
-# Create a summary of predictions vs ground truth 
-print("\nDetailed Prediction Summary:") 
-for i, (text, true_label, pred_label) in enumerate(zip(texts, label_ids, predicted_labels)): 
+# Print detailed classification report for test set 
+print("\nDetailed Test Set Performance:") 
+print(classification_report(test_labels, test_preds, target_names=label_mapping.keys())) 
+
+# Create a summary of predictions vs ground truth for test set 
+print("\nDetailed Test Set Prediction Summary:") 
+for i, (text, true_label, pred_label) in enumerate(zip(test_texts, test_labels, test_preds)): 
     true_label_str = reverse_label_mapping[true_label] 
     pred_label_str = reverse_label_mapping[pred_label] 
-    print(f"\nLetter {i+1}:") 
-    print(f"Original Label: {true_label_str}") 
+    print(f"\nTest Sample {i+1}:") 
+    print(f"True Label: {true_label_str}") 
     print(f"Predicted Label: {pred_label_str}") 
+    print(f"Prediction {'Correct' if true_label_str == pred_label_str else 'Incorrect'}") 
     print("Summarized Text:") 
     print(text[:500] + "..." if len(text) > 500 else text) 
     print("-" * 80) 
 
-# Calculate overall accuracy 
-accuracy = accuracy_score(label_ids, predicted_labels) 
-print(f"\nOverall Accuracy: {accuracy:.2f}") 
+# Calculate overall test accuracy 
+test_accuracy = accuracy_score(test_labels, test_preds) 
+print(f"\nOverall Test Accuracy: {test_accuracy:.2f}") 
 
 # Save the final model 
 bert_model.save_pretrained('./final_model') 
