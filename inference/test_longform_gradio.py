@@ -18,7 +18,7 @@ logger = logging.getLogger(__name__)
 MAX_LENGTH = 4096
 
 # Load the saved model and tokenizer
-model_path = '/home/swleocresearch/Desktop/triage-ai/train/medical_longformer_2'
+model_path = '/home/swleocresearch/Desktop/triage-ai/train/medical_longformer_balanced'
 model = LongformerForSequenceClassification.from_pretrained(model_path)
 tokenizer = LongformerTokenizer.from_pretrained(model_path)
 
