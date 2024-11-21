@@ -19,6 +19,7 @@ from pdf2image import convert_from_path
 import re
 import uuid
 import pandas as pd
+from datetime import datetime
 
 logging.basicConfig(level=logging.INFO)
 
@@ -175,7 +176,7 @@ def analyze_medical_referral_with_llama(text):
         print(f"Analyzing {len(chunks)} chunks of text (ID: {analysis_id})")
 
         results = []
-        for chunk_num, chunk in enumerate(chunks[:10], 1):  # Use enumerate to track chunk number
+        for chunk_num, chunk in enumerate(chunks[:10], 1):
             print(f"Analyzing chunk {chunk_num}/10 (ID: {analysis_id})")
             prompt = f"""Analyze this medical text:
             {chunk}
@@ -189,7 +190,7 @@ def analyze_medical_referral_with_llama(text):
             }}
             """
 
-            response = llm.invoke(prompt)  # Updated to use invoke instead of predict
+            response = llm.invoke(prompt)
             print(f"Llama response for chunk {chunk_num} (ID: {analysis_id}): {response}")
             
             try:
@@ -227,8 +228,9 @@ def analyze_medical_referral_with_llama(text):
         }
 
         print(f"Combined result (ID: {analysis_id}): {combined_result}")
-
-        return format_result(combined_result, analysis_id)
+        
+        # Return the dictionary instead of formatting it
+        return combined_result
 
     except Exception as e:
         logging.error(f"An error occurred in analyze_medical_referral_with_llama (ID: {analysis_id}): {str(e)}")
@@ -238,132 +240,132 @@ def analyze_medical_referral_with_llama(text):
         end_time = time.time()
         print(f"Medical referral analysis with Llama completed in {end_time - start_time:.2f} seconds (ID: {analysis_id})")
 
-def format_result(result, analysis_id):
-    return f"""
-    Analysis ID: {analysis_id}
-    1. Procedure type: {result['procedure_type'].capitalize()}
-    2. Body part: {result['body_part'].capitalize()}
-    3. Arthroplasty: {result['arthroplasty'].capitalize()}
-    4. Further information needed: {result['further_information_needed'].capitalize()}
-    """
+def save_analysis_changes(original_result, modified_result, analysis_id, filename):
+    """Save all field values, marking which ones were changed"""
+    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    
+    # Check if any changes were made
+    changes_made = False
+    for key in original_result:
+        if original_result[key] != modified_result[key]:
+            changes_made = True
+            break
+    
+    if changes_made:
+        data = []
+        # Save all fields
+        for key in original_result:
+            data.append({
+                'timestamp': timestamp,
+                'analysis_id': analysis_id,
+                'filename': filename,
+                'field': key,
+                'original_value': original_result[key],
+                'modified_value': modified_result[key],
+                'was_changed': original_result[key] != modified_result[key]
+            })
+        
+        df = pd.DataFrame(data)
+        csv_path = 'analysis_changes.csv'
+        
+        # Append to existing CSV or create new one
+        if os.path.exists(csv_path):
+            df.to_csv(csv_path, mode='a', header=False, index=False)
+        else:
+            # Add 'was_changed' column to track which fields were actually modified
+            df.to_csv(csv_path, index=False)
+        
+        return True
+    return False
 
-async def process_medical_referral(pdf_file):
-    print(f"Processing file: {pdf_file.name}")
-    start_time = time.time()
+def calculate_accuracy_metrics():
+    """Calculate accuracy metrics from saved changes"""
+    if not os.path.exists('analysis_history.csv'):
+        return {
+            'total_analyzed': 0,
+            'total_corrected': 0,
+            'accuracy_by_field': {},
+            'overall_accuracy': 0.0
+        }
     
     try:
-        # Extract text directly without creating another temp file
-        text = await extract_text_from_pdf(pdf_file)
+        # Read all analyses
+        history_df = pd.read_csv('analysis_history.csv')
+        total_analyzed = len(history_df['analysis_id'].unique())
         
-        if not text or text.startswith("Error:"):
-            st.error("No text was extracted from the PDF.")
-            return "Error: No text extracted from PDF"
-
-        st.write(f"Extracted text (first 200 characters): {text[:200]}...")
-
-        # Analyze the extracted text
-        analysis = analyze_medical_referral(text)
-
-        end_time = time.time()
-        print(f"Total processing time: {end_time - start_time:.2f} seconds")
-        return analysis
+        # Read corrections (if any exist)
+        if os.path.exists('analysis_changes.csv'):
+            changes_df = pd.read_csv('analysis_changes.csv')
+            total_corrected = len(changes_df['analysis_id'].unique())
+        else:
+            total_corrected = 0
+            changes_df = pd.DataFrame()
+        
+        # Calculate accuracy by field
+        field_counts = changes_df['field'].value_counts() if not changes_df.empty else pd.Series()
+        all_fields = ['procedure_type', 'body_part', 'arthroplasty', 'further_information_needed']
+        
+        accuracy_by_field = {}
+        for field in all_fields:
+            errors = field_counts.get(field, 0)
+            accuracy = (total_analyzed - errors) / total_analyzed if total_analyzed > 0 else 0
+            accuracy_by_field[field] = round(accuracy * 100, 2)
+        
+        # Calculate overall accuracy
+        overall_accuracy = (total_analyzed - total_corrected) / total_analyzed if total_analyzed > 0 else 0
+        overall_accuracy = round(overall_accuracy * 100, 2)
+        
+        return {
+            'total_analyzed': total_analyzed,
+            'total_corrected': total_corrected,
+            'accuracy_by_field': accuracy_by_field,
+            'overall_accuracy': overall_accuracy
+        }
     except Exception as e:
-        logging.error(f"Error processing medical referral: {str(e)}")
-        return f"Error: {str(e)}"
+        logging.error(f"Error calculating accuracy metrics: {str(e)}")
+        return None
 
-def get_category_examples():
-    return {
-        "arthroplasty_hip": [
-            """
-            78-year-old lady with severe degenerative changes in her right hip. X-rays show joint space narrowing 
-            and osteophyte formation. Patient reports groin pain, difficulty with walking and activities of daily living. 
-            Failed conservative management including physiotherapy.
-            """,
-            """
-            65-year-old male with advanced osteoarthritis of the left hip. MRI shows bone-on-bone changes.
-            Patient has significant pain on weight bearing and limited range of motion. Pain affecting sleep and mobility.
-            """,
-            """
-            55-year-old female with avascular necrosis of the right hip confirmed on imaging.
-            Progressive pain over 6 months, now requiring walking stick. Limited hip rotation and groin pain.
-            """
-        ],
-        
-        "soft_tissue_hip": [
-            """
-            32-year-old athlete with right hip pain. MRI shows labral tear.
-            Pain worse with flexion and rotation. No degenerative changes noted.
-            Clicking sensation with movement. Failed physiotherapy.
-            """,
-            """
-            45-year-old with hip impingement syndrome. Pain on hip flexion and internal rotation.
-            Positive impingement test. X-rays show cam deformity but preserved joint space.
-            """,
-            """
-            28-year-old runner with lateral hip pain. Clinical features of trochanteric bursitis.
-            Pain on palpation of greater trochanter. Normal hip joint x-rays.
-            """
-        ],
-        
-        "arthroplasty_knee": [
-            """
-            72-year-old with end-stage osteoarthritis of right knee. X-rays show tricompartmental changes
-            with bone-on-bone in medial compartment. Constant pain, difficulty with stairs, failed injections.
-            """,
-            """
-            68-year-old with severe bilateral knee arthritis, worse on right. Significant varus deformity.
-            X-rays show complete loss of joint space medially. Unable to walk more than 100 yards.
-            """,
-            """
-            75-year-old with post-traumatic arthritis of left knee. Previous tibial plateau fracture.
-            Now shows advanced degenerative changes. Persistent pain despite conservative measures.
-            """
-        ],
-        
-        "soft_tissue_knee": [
-            """
-            25-year-old footballer with acute knee injury. MRI confirms ACL rupture.
-            Positive Lachman test. No degenerative changes seen on x-ray.
-            Episodes of giving way.
-            """,
-            """
-            50-year-old with medial knee pain. MRI shows complex medial meniscal tear.
-            Mechanical symptoms including locking. No significant arthritis on x-rays.
-            """,
-            """
-            35-year-old with anterior knee pain. Clinical features of patellofemoral syndrome.
-            Pain worse on stairs. Normal x-rays. Failed physiotherapy regime.
-            """
-        ]
+def save_analysis_history(result, analysis_id, filename, model_type):
+    """Save original analysis results"""
+    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    
+    data = {
+        'timestamp': [timestamp],
+        'analysis_id': [analysis_id],
+        'filename': [filename],
+        'model_type': [model_type],  # 'llama' or 'rule_based'
+        'procedure_type': [result['procedure_type']],
+        'body_part': [result['body_part']],
+        'arthroplasty': [result['arthroplasty']],
+        'further_information_needed': [result['further_information_needed']]
     }
-
-def analyze_medical_referral_with_examples(text, examples):
-    # Compare the input text with examples from each category
-    similarities = {}
-    for category, example_list in examples.items():
-        for example in example_list:
-            # Calculate similarity between input text and example
-            # (You could use various methods here - simple term matching,
-            # embeddings, or more sophisticated NLP techniques)
-            similarity_score = calculate_similarity(text, example)
-            similarities[category] = max(similarities.get(category, 0), similarity_score)
     
-    # Determine the most likely category
-    most_likely_category = max(similarities.items(), key=lambda x: x[1])[0]
+    df = pd.DataFrame(data)
+    csv_path = 'analysis_history.csv'
     
-    # Extract procedure type and body part from category
-    procedure_type, body_part = most_likely_category.split('_')
-    
-    return {
-        "procedure_type": procedure_type.title(),
-        "body_part": body_part.title(),
-        "confidence_score": similarities[most_likely_category]
-    }
+    if os.path.exists(csv_path):
+        df.to_csv(csv_path, mode='a', header=False, index=False)
+    else:
+        df.to_csv(csv_path, index=False)
 
 # Streamlit UI
 def main():
     st.title("Medical Referral Analyzer")
     
+    # Display accuracy metrics
+    st.sidebar.title("Analysis Accuracy")
+    metrics = calculate_accuracy_metrics()
+    
+    if metrics:
+        st.sidebar.metric("Overall Accuracy", f"{metrics['overall_accuracy']}%")
+        st.sidebar.markdown("### Accuracy by Field")
+        for field, accuracy in metrics['accuracy_by_field'].items():
+            st.sidebar.metric(field.replace('_', ' ').title(), f"{accuracy}%")
+        
+        st.sidebar.markdown("### Summary")
+        st.sidebar.text(f"Total analyzed: {metrics['total_analyzed']}")
+        st.sidebar.text(f"Total corrected: {metrics['total_corrected']}")
+
     # Clear any cached data
     st.cache_data.clear()
 
@@ -521,32 +523,36 @@ def main():
                                 'moderate oa', 'severe oa', 'advanced oa',
                                 'not coping', 'mobility seriously limited',
                                 'failed conservative', 'failed physio',
-                                'despite physiotherapy', 'in agony'
+                                'despite physiotherapy', 'in agony',
+                                'degenerative changes',  # Add this indicator
+                                'degenerative cha'      # Add shortened version for partial matches
                             ]
                             
-                            if any(indicator in text_lower for indicator in arthroplasty_indicators):
+                            soft_tissue_only_indicators = [
+                                'acute tear', 'recent injury', 'fresh injury',
+                                'new tear', 'sports injury'
+                            ]
+                            
+                            # Check for degenerative changes specifically
+                            has_degenerative_changes = any(term in text_lower for term in ['degenerative changes', 'degenerative cha'])
+                            has_acute_injury = any(term in text_lower for term in soft_tissue_only_indicators)
+                            
+                            if has_degenerative_changes and not has_acute_injury:
                                 procedure_type = "Arthroplasty"
-                                # Find the matching indicator for evidence
-                                matching_indicator = next((indicator for indicator in arthroplasty_indicators if indicator in text_lower), None)
-                                if matching_indicator:
-                                    start = max(0, text_lower.find(matching_indicator) - 50)
-                                    end = min(len(text), text_lower.find(matching_indicator) + len(matching_indicator) + 50)
-                                    clinical_evidence = text[start:end].strip()
+                                pattern = "degenerative joint disease"
+                                intervention = "arthroplasty"
+                            elif any(indicator in text_lower for indicator in arthroplasty_indicators):
+                                procedure_type = "Arthroplasty"
+                                pattern = "degenerative joint disease"
+                                intervention = "arthroplasty"
+                            else:
+                                procedure_type = "Unknown"
+                                pattern = "unclear pathology"
+                                intervention = "further investigation needed"
                             
                             st.markdown(f"- **Procedure Type:** {procedure_type}")
                             if clinical_evidence:
                                 st.markdown(f"  - Evidence: '{clinical_evidence}'")
-                            
-                            # Determine pattern and intervention
-                            if procedure_type == "Arthroplasty":
-                                pattern = "degenerative joint disease"
-                                intervention = "arthroplasty"
-                            else:
-                                pattern = "unclear pathology"
-                                intervention = "further investigation needed"
-                            
-                            st.markdown("Based on the clinical picture:")
-                            st.markdown(f"- Pattern suggests {pattern}")
                             
                             # Show evidence that led to the decision
                             if procedure_type == "Arthroplasty":
@@ -580,46 +586,125 @@ def main():
                         if use_llama:
                             print("Using Llama path...")
                             llama_result = analyze_medical_referral_with_llama(text)
-                            
-                            # Create results data from Llama analysis
-                            results = {
-                                'Field': ['Procedure Type', 'Body Part'],
-                                'Value': [llama_result['procedure_type'], llama_result['body_part']]
-                            }
-                            
-                            if llama_result['procedure_type'] == "Arthroplasty":
-                                results['Field'].append('Arthroplasty')
-                                results['Value'].append(llama_result['arthroplasty'])
-                            
-                            results['Field'].append('Further Information Needed')
-                            results['Value'].append(llama_result['further_information_needed'])
-                        else:
-                            print("Using regular analysis path...")
-                            # Get the values from the previous analysis
-                            body_part = primary_body_part  # This was set in Decision Logic
-                            procedure_type = procedure_type  # This was set in Decision Logic
-                            
-                            # Create results data from the analysis
-                            analysis_result = analyze_medical_referral(text)
-                            
-                            if analysis_result.body_part not in ['hip', 'knee']:
-                                st.markdown("**This is not a hip nor knee referral letter**")
-                            else:
-                                results = {
-                                    'Field': ['Procedure Type', 'Body Part'],
-                                    'Value': [analysis_result.procedure_type.title(), analysis_result.body_part.title()]
-                                }
-                                
-                                if analysis_result.procedure_type == 'arthroplasty':
-                                    results['Field'].append('Arthroplasty')
-                                    results['Value'].append(analysis_result.arthroplasty.title())
-                                
-                                results['Field'].append('Further Information Needed')
-                                results['Value'].append(analysis_result.further_information_needed.title())
+                            if isinstance(llama_result, dict):  # Check if we got a valid dictionary result
+                                original_result = llama_result  # Use the result directly
                                 
                                 # Create DataFrame and display
-                                df = pd.DataFrame(results)
+                                df = pd.DataFrame({
+                                    'Field': ['Procedure Type', 'Body Part', 'Arthroplasty', 'Further Information Needed'],
+                                    'Value': [
+                                        original_result['procedure_type'].title(),
+                                        original_result['body_part'].title(),
+                                        original_result['arthroplasty'].title(),
+                                        original_result['further_information_needed'].title()
+                                    ]
+                                })
                                 st.dataframe(df, hide_index=True)
+                                
+                                # Add dropdowns for modification
+                                st.markdown("### Modify Analysis")
+                                modified_result = {}
+                                
+                                modified_result['procedure_type'] = st.selectbox(
+                                    'Procedure Type',
+                                    options=['arthroplasty', 'soft tissue', 'unknown'],
+                                    index=['arthroplasty', 'soft tissue', 'unknown'].index(original_result['procedure_type'])
+                                )
+                                
+                                modified_result['body_part'] = st.selectbox(
+                                    'Body Part',
+                                    options=['hip', 'knee', 'unknown'],
+                                    index=['hip', 'knee', 'unknown'].index(original_result['body_part'])
+                                )
+                                
+                                if modified_result['procedure_type'] == 'arthroplasty':
+                                    modified_result['arthroplasty'] = st.selectbox(
+                                        'Arthroplasty Type',
+                                        options=['primary', 'revision', 'unknown'],
+                                        index=['primary', 'revision', 'unknown'].index(
+                                            original_result['arthroplasty'] if original_result['arthroplasty'] != 'N/A' else 'unknown'
+                                        )
+                                    )
+                                else:
+                                    modified_result['arthroplasty'] = 'N/A'
+                                
+                                modified_result['further_information_needed'] = st.selectbox(
+                                    'Further Information Needed',
+                                    options=['yes', 'no'],
+                                    index=['yes', 'no'].index(original_result['further_information_needed'])
+                                )
+                            else:
+                                st.error(f"Error in Llama analysis: {llama_result}")
+                        else:
+                            print("Using regular analysis path...")
+                            # Use the values calculated in Decision Logic section
+                            original_result = {
+                                'procedure_type': procedure_type.lower(),
+                                'body_part': primary_body_part.lower(),
+                                'arthroplasty': 'N/A' if procedure_type.lower() != 'arthroplasty' else 'unknown',
+                                'further_information_needed': 'yes' if pattern == "unclear pathology" else 'no'
+                            }
+                            
+                            if original_result['body_part'] not in ['hip', 'knee']:
+                                st.markdown("**This is not a hip nor knee referral letter**")
+                            else:
+                                # Create DataFrame and display
+                                df = pd.DataFrame({
+                                    'Field': ['Procedure Type', 'Body Part', 'Arthroplasty', 'Further Information Needed'],
+                                    'Value': [
+                                        original_result['procedure_type'].title(),
+                                        original_result['body_part'].title(),
+                                        original_result['arthroplasty'].title(),
+                                        original_result['further_information_needed'].title()
+                                    ]
+                                })
+                                st.dataframe(df, hide_index=True)
+                                
+                                # Add dropdowns for modification
+                                st.markdown("### Modify Analysis")
+                                modified_result = {}
+                                
+                                modified_result['procedure_type'] = st.selectbox(
+                                    'Procedure Type',
+                                    options=['arthroplasty', 'soft tissue', 'unknown'],
+                                    index=['arthroplasty', 'soft tissue', 'unknown'].index(original_result['procedure_type'])
+                                )
+                                
+                                modified_result['body_part'] = st.selectbox(
+                                    'Body Part',
+                                    options=['hip', 'knee', 'unknown'],
+                                    index=['hip', 'knee', 'unknown'].index(original_result['body_part'])
+                                )
+                                
+                                if modified_result['procedure_type'] == 'arthroplasty':
+                                    modified_result['arthroplasty'] = st.selectbox(
+                                        'Arthroplasty Type',
+                                        options=['primary', 'revision', 'unknown'],
+                                        index=['primary', 'revision', 'unknown'].index(
+                                            original_result['arthroplasty'] if original_result['arthroplasty'] != 'N/A' else 'unknown'
+                                        )
+                                    )
+                                else:
+                                    modified_result['arthroplasty'] = 'N/A'
+                                
+                                modified_result['further_information_needed'] = st.selectbox(
+                                    'Further Information Needed',
+                                    options=['yes', 'no'],
+                                    index=['yes', 'no'].index(original_result['further_information_needed'])
+                                )
+                                
+                                # Save button
+                                if st.button('Save Changes'):
+                                    changes_saved = save_analysis_changes(
+                                        original_result,
+                                        modified_result,
+                                        analysis_id,
+                                        uploaded_file.name
+                                    )
+                                    if changes_saved:
+                                        st.success('Changes saved successfully!')
+                                    else:
+                                        st.info('No changes detected.')
                         
                         print(f"Analysis complete. ID: {analysis_id}")
                         st.markdown(f"\nAnalysis ID: {analysis_id}")

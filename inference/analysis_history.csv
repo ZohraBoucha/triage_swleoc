@@ -1,0 +1,8 @@
+timestamp,analysis_id,filename,model_type,procedure_type,body_part,arthroplasty,further_information_needed
+2024-11-21 17:20:19,7f33cff0,2024-02-08 41595651 R .pdf,rule_based,soft tissue,hip,N/A,no
+2024-11-21 17:20:56,be9d9e1b,2024-02-08 41595651 R .pdf,rule_based,soft tissue,hip,N/A,no
+2024-11-21 17:21:13,8f303a38,2024-02-08 41595651 R .pdf,rule_based,soft tissue,hip,N/A,no
+2024-11-21 17:22:20,38ffccbe,2024-02-08 41595651 R .pdf,rule_based,soft tissue,hip,N/A,no
+2024-11-21 17:23:55,cf353c8b,2023-04-03 41950145-R.pdf,rule_based,soft tissue,hip,N/A,no
+2024-11-21 17:25:44,16084d01,2023-04-03 41950145-R.pdf,rule_based,soft tissue,hip,N/A,no
+2024-11-21 17:26:41,4b1ac6d6,2023-04-03 41950145-R.pdf,rule_based,unknown,knee,N/A,yes
