@@ -1,3 +1,7 @@
 /datasets
 /models
 /langchain3.10
+/langchain
+/.ipynb_checkpoints
+/.venv
+/test_dataset

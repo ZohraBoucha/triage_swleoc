@@ -10,7 +10,7 @@ import logging
 import time
 from doctr.io import DocumentFile
 from doctr.models import ocr_predictor
-from llama_cpp import Llama
+from langchain.llms import Ollama
 import json
 import traceback
 import pdfplumber
@@ -18,6 +18,7 @@ import pytesseract
 from pdf2image import convert_from_path
 import re
 import uuid
+import pandas as pd
 
 logging.basicConfig(level=logging.INFO)
 
@@ -25,10 +26,7 @@ logging.basicConfig(level=logging.INFO)
 model = ocr_predictor(pretrained=True)
 
 # Initialize the Llama model
-llm = Llama.from_pretrained(
-    repo_id="bartowski/Llama-3.2-3B-Instruct-GGUF",
-    filename="Llama-3.2-3B-Instruct-IQ3_M.gguf",
-)
+llm = Ollama(model="llama3.1:70b")
 
 class MedicalReferral(BaseModel):
     procedure_type: str = Field(description="The type of procedure (arthroplasty, soft tissue)")
@@ -37,12 +35,16 @@ class MedicalReferral(BaseModel):
     further_information_needed: str = Field(description="Whether further information is needed (yes, no)")
 
 async def extract_text_from_pdf(pdf_file):
-    print(f"Starting text extraction from PDF: {pdf_file.name}")
+    print(f"Starting text extraction from PDF: {pdf_file if isinstance(pdf_file, str) else pdf_file.name}")
     start_time = time.time()
     
-    with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as temp_file:
-        temp_file.write(pdf_file.read())
-        temp_file_path = temp_file.name
+    # Handle both string paths and uploaded files
+    if isinstance(pdf_file, str):
+        temp_file_path = pdf_file
+    else:
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as temp_file:
+            temp_file.write(pdf_file.read())
+            temp_file_path = temp_file.name
 
     try:
         # Convert PDF to images
@@ -75,11 +77,12 @@ def analyze_medical_referral(text):
     print("Starting medical referral analysis...")
     start_time = time.time()
     try:
+        # Initialize with unknowns and yes for further info needed
         result = MedicalReferral(
             procedure_type='unknown',
             body_part='unknown',
             arthroplasty='unknown',
-            further_information_needed='no'
+            further_information_needed='yes'  # Start with yes
         )
         
         text = text.lower()
@@ -90,41 +93,61 @@ def analyze_medical_referral(text):
         elif any(term in text for term in ['knee', 'patella', 'tibia', 'femur']):
             result.body_part = 'knee'
         
-        # Determine procedure type and arthroplasty status
-        if 'arthroplasty' in text or 'replacement' in text:
+        # Enhanced revision detection first
+        previous_replacement_indicators = [
+            'had a knee replacement', 'had a hip replacement',
+            'previous replacement', 'previous arthroplasty',
+            'post replacement', 'post arthroplasty',
+            'after replacement', 'after arthroplasty',
+            'bilateral.*replacements',  # Add this pattern
+            'previously had.*replacements',  # Add this pattern
+            'replacements.*in situ',  # Add this pattern
+            'had.*bilateral'  # Add this pattern
+        ]
+        
+        if any(re.search(indicator, text) for indicator in previous_replacement_indicators):
             result.procedure_type = 'arthroplasty'
-            
-            previous_treatment_indicators = [
-                'previous', 'prior', 'earlier', 'before', 'already had',
-                'underwent', 'revision', 'redo', 'failed'
+            result.arthroplasty = 'revision'
+        else:
+            # Original arthroplasty detection
+            arthroplasty_indicators = [
+                'replacement', 'arthroplasty',
+                'consideration for hip replacement', 'consideration for knee replacement',
+                'moderate oa', 'severe oa', 'advanced oa',
+                'not coping', 'mobility seriously limited',
+                'failed conservative', 'failed physio', 'despite physiotherapy',
+                'degenerative changes', 'loss of joint space',  # Add these indicators
+                'osteophytes', 'walks with a frame',           # Add these indicators
+                'debilitating'                                 # Add this indicator
             ]
             
-            if any(indicator in text for indicator in previous_treatment_indicators):
-                result.arthroplasty = 'revision'
-            else:
-                result.arthroplasty = 'primary'
+            # Add soft tissue conditions including knee-specific ones
+            soft_tissue_indicators = [
+                'bursitis', 'impingement', 'tendinopathy',
+                'tendinitis', 'tendonitis', 'labral',
+                'trochanteric', 'abductor',
+                'meniscal tear', 'meniscus tear',  # Add these specific indicators
+                'acl', 'mcl', 'lcl', 'pcl',
+                'ligament tear', 'cartilage tear'
+            ]
             
-            if 'primary arthroplasty' in text:
+            if any(indicator in text for indicator in soft_tissue_indicators):
+                result.procedure_type = 'soft tissue'
+            elif any(indicator in text for indicator in arthroplasty_indicators):
+                result.procedure_type = 'arthroplasty'
                 result.arthroplasty = 'primary'
-            elif 'revision arthroplasty' in text:
-                result.arthroplasty = 'revision'
-        elif any(term in text for term in ['soft tissue', 'ligament', 'tendon', 'muscle', 'bursa', 
-                                           'meniscus', 'meniscal tear', 'sport injury']):
-            result.procedure_type = 'soft tissue'
         
-        # Check if further information is needed
-        info_needed_indicators = ['need more', 'additional info', 'clarify', 'unclear', 'missing']
-        if any(indicator in text for indicator in info_needed_indicators):
+        # Only set to 'no' if ALL required fields are known
+        if (result.body_part != 'unknown' and 
+            result.procedure_type != 'unknown' and 
+            (result.procedure_type != 'arthroplasty' or 
+             (result.procedure_type == 'arthroplasty' and result.arthroplasty != 'unknown'))):
+            result.further_information_needed = 'no'
+        else:
             result.further_information_needed = 'yes'
         
-        analysis = f"""
-        1. Procedure type: {result.procedure_type.capitalize()}
-        2. Body part: {result.body_part.capitalize()}
-        3. Arthroplasty: {result.arthroplasty.capitalize()}
-        4. Further information needed: {result.further_information_needed.capitalize()}
-        """
-        
-        return analysis
+        return result
+
     except Exception as e:
         logging.error(f"An error occurred in analyze_medical_referral: {str(e)}")
         return f"Error: {str(e)}"
@@ -152,8 +175,8 @@ def analyze_medical_referral_with_llama(text):
         print(f"Analyzing {len(chunks)} chunks of text (ID: {analysis_id})")
 
         results = []
-        for i, chunk in enumerate(chunks[:10]):  # Analyze up to 10 chunks
-            print(f"Analyzing chunk {i+1}/10 (ID: {analysis_id})")
+        for chunk_num, chunk in enumerate(chunks[:10], 1):  # Use enumerate to track chunk number
+            print(f"Analyzing chunk {chunk_num}/10 (ID: {analysis_id})")
             prompt = f"""Analyze this medical text:
             {chunk}
 
@@ -166,35 +189,40 @@ def analyze_medical_referral_with_llama(text):
             }}
             """
 
-            response = llm.create_chat_completion(
-                messages=[{"role": "user", "content": prompt}]
-            )
-
-            result_json = response['choices'][0]['message']['content']
-            print(f"Llama response for chunk {i+1} (ID: {analysis_id}): {result_json}")
+            response = llm.invoke(prompt)  # Updated to use invoke instead of predict
+            print(f"Llama response for chunk {chunk_num} (ID: {analysis_id}): {response}")
             
             try:
-                json_match = re.search(r'\{[^}]+\}', result_json)
+                json_match = re.search(r'\{[^}]+\}', response)
                 if json_match:
                     result = json.loads(json_match.group())
                     if all(key in result for key in ["procedure_type", "body_part", "arthroplasty", "further_information_needed"]):
                         results.append(result)
-                        print(f"Valid result found in chunk {i+1} (ID: {analysis_id})")
+                        print(f"Valid result found in chunk {chunk_num} (ID: {analysis_id})")
                     else:
-                        print(f"Incomplete JSON in chunk {i+1} (ID: {analysis_id})")
+                        print(f"Incomplete JSON in chunk {chunk_num} (ID: {analysis_id})")
                 else:
-                    print(f"No valid JSON found in chunk {i+1} (ID: {analysis_id})")
+                    print(f"No valid JSON found in chunk {chunk_num} (ID: {analysis_id})")
             except json.JSONDecodeError:
-                print(f"Failed to parse JSON for chunk {i+1} (ID: {analysis_id})")
+                print(f"Failed to parse JSON for chunk {chunk_num} (ID: {analysis_id})")
 
         if not results:
             return f"Error: No valid results from Llama analysis (ID: {analysis_id})"
 
-        # Combine results from all analyzed chunks
+        # Combine results from all analyzed chunks - prioritize known values over unknowns
         combined_result = {
-            "procedure_type": max(set(r['procedure_type'] for r in results), key=lambda x: [r['procedure_type'] for r in results].count(x)),
-            "body_part": max(set(r['body_part'] for r in results), key=lambda x: [r['body_part'] for r in results].count(x)),
-            "arthroplasty": max(set(r['arthroplasty'] for r in results), key=lambda x: [r['arthroplasty'] for r in results].count(x)),
+            "procedure_type": max(
+                (r['procedure_type'] for r in results),
+                key=lambda x: 0 if x == "unknown" else results.count(x)
+            ),
+            "body_part": max(
+                (r['body_part'] for r in results),
+                key=lambda x: 0 if x == "unknown" else results.count(x)
+            ),
+            "arthroplasty": max(
+                (r['arthroplasty'] for r in results),
+                key=lambda x: 0 if x == "unknown" else results.count(x)
+            ),
             "further_information_needed": "yes" if any(r['further_information_needed'] == "yes" for r in results) else "no"
         }
 
@@ -223,23 +251,12 @@ async def process_medical_referral(pdf_file):
     print(f"Processing file: {pdf_file.name}")
     start_time = time.time()
     
-    with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as temp_file:
-        temp_file.write(pdf_file.read())
-        temp_file_path = temp_file.name
-
     try:
-        # Get PDF info
-        with open(temp_file_path, 'rb') as file:
-            reader = PyPDF2.PdfReader(file)
-            num_pages = len(reader.pages)
+        # Extract text directly without creating another temp file
+        text = await extract_text_from_pdf(pdf_file)
         
-        st.write(f"PDF Info: {num_pages} page(s)")
-
-        # Extract text from PDF
-        text = await extract_text_from_pdf(temp_file_path)
-        
-        if not text.strip():
-            st.error("No text was extracted from the PDF, even after attempting docTR.")
+        if not text or text.startswith("Error:"):
+            st.error("No text was extracted from the PDF.")
             return "Error: No text extracted from PDF"
 
         st.write(f"Extracted text (first 200 characters): {text[:200]}...")
@@ -250,18 +267,107 @@ async def process_medical_referral(pdf_file):
         end_time = time.time()
         print(f"Total processing time: {end_time - start_time:.2f} seconds")
         return analysis
-    finally:
-        # Clean up the temporary file
-        os.unlink(temp_file_path)
+    except Exception as e:
+        logging.error(f"Error processing medical referral: {str(e)}")
+        return f"Error: {str(e)}"
+
+def get_category_examples():
+    return {
+        "arthroplasty_hip": [
+            """
+            78-year-old lady with severe degenerative changes in her right hip. X-rays show joint space narrowing 
+            and osteophyte formation. Patient reports groin pain, difficulty with walking and activities of daily living. 
+            Failed conservative management including physiotherapy.
+            """,
+            """
+            65-year-old male with advanced osteoarthritis of the left hip. MRI shows bone-on-bone changes.
+            Patient has significant pain on weight bearing and limited range of motion. Pain affecting sleep and mobility.
+            """,
+            """
+            55-year-old female with avascular necrosis of the right hip confirmed on imaging.
+            Progressive pain over 6 months, now requiring walking stick. Limited hip rotation and groin pain.
+            """
+        ],
+        
+        "soft_tissue_hip": [
+            """
+            32-year-old athlete with right hip pain. MRI shows labral tear.
+            Pain worse with flexion and rotation. No degenerative changes noted.
+            Clicking sensation with movement. Failed physiotherapy.
+            """,
+            """
+            45-year-old with hip impingement syndrome. Pain on hip flexion and internal rotation.
+            Positive impingement test. X-rays show cam deformity but preserved joint space.
+            """,
+            """
+            28-year-old runner with lateral hip pain. Clinical features of trochanteric bursitis.
+            Pain on palpation of greater trochanter. Normal hip joint x-rays.
+            """
+        ],
+        
+        "arthroplasty_knee": [
+            """
+            72-year-old with end-stage osteoarthritis of right knee. X-rays show tricompartmental changes
+            with bone-on-bone in medial compartment. Constant pain, difficulty with stairs, failed injections.
+            """,
+            """
+            68-year-old with severe bilateral knee arthritis, worse on right. Significant varus deformity.
+            X-rays show complete loss of joint space medially. Unable to walk more than 100 yards.
+            """,
+            """
+            75-year-old with post-traumatic arthritis of left knee. Previous tibial plateau fracture.
+            Now shows advanced degenerative changes. Persistent pain despite conservative measures.
+            """
+        ],
+        
+        "soft_tissue_knee": [
+            """
+            25-year-old footballer with acute knee injury. MRI confirms ACL rupture.
+            Positive Lachman test. No degenerative changes seen on x-ray.
+            Episodes of giving way.
+            """,
+            """
+            50-year-old with medial knee pain. MRI shows complex medial meniscal tear.
+            Mechanical symptoms including locking. No significant arthritis on x-rays.
+            """,
+            """
+            35-year-old with anterior knee pain. Clinical features of patellofemoral syndrome.
+            Pain worse on stairs. Normal x-rays. Failed physiotherapy regime.
+            """
+        ]
+    }
+
+def analyze_medical_referral_with_examples(text, examples):
+    # Compare the input text with examples from each category
+    similarities = {}
+    for category, example_list in examples.items():
+        for example in example_list:
+            # Calculate similarity between input text and example
+            # (You could use various methods here - simple term matching,
+            # embeddings, or more sophisticated NLP techniques)
+            similarity_score = calculate_similarity(text, example)
+            similarities[category] = max(similarities.get(category, 0), similarity_score)
+    
+    # Determine the most likely category
+    most_likely_category = max(similarities.items(), key=lambda x: x[1])[0]
+    
+    # Extract procedure type and body part from category
+    procedure_type, body_part = most_likely_category.split('_')
+    
+    return {
+        "procedure_type": procedure_type.title(),
+        "body_part": body_part.title(),
+        "confidence_score": similarities[most_likely_category]
+    }
 
 # Streamlit UI
 def main():
     st.title("Medical Referral Analyzer")
-
+    
     # Clear any cached data
     st.cache_data.clear()
 
-    use_llama = st.checkbox("Use Llama 3.2 for analysis")
+    use_llama = st.checkbox("Use Llama 3.1 for analysis")
 
     uploaded_files = st.file_uploader("Choose PDF files", accept_multiple_files=True, type="pdf")
 
@@ -269,47 +375,257 @@ def main():
         for uploaded_file in uploaded_files:
             st.write(f"Processing: {uploaded_file.name}")
             
-            progress_bar = st.progress(0)
-            status_text = st.empty()
-            
-            def update_progress(step, total_steps):
-                progress = int((step / total_steps) * 100)
-                progress_bar.progress(progress)
-                status_text.text(f"Progress: {progress}%")
-            
             with st.spinner('Analyzing the document...'):
-                start_time = time.time()
-                
-                update_progress(1, 4)
-                status_text.text("Extracting text from PDF...")
-                
-                text = asyncio.run(extract_text_from_pdf(uploaded_file))
-                
-                if text.startswith("Error:"):
-                    st.error(text)
-                    continue
+                try:
+                    text = asyncio.run(extract_text_from_pdf(uploaded_file))
+                    
+                    if text.startswith("Error:"):
+                        st.error(text)
+                        continue
 
-                st.write(f"Extracted text (first 500 characters): {text[:500]}...")
-                st.write(f"Total characters extracted: {len(text)}")
-                
-                update_progress(2, 4)
-                status_text.text("Analyzing extracted text...")
-                
-                if use_llama:
-                    analysis = analyze_medical_referral_with_llama(text)
-                else:
-                    analysis = analyze_medical_referral(text)
-                
-                end_time = time.time()
-                processing_time = end_time - start_time
-                
-                update_progress(4, 4)
-                status_text.text("Analysis complete!")
-            
-            st.write("Analysis:")
-            st.write(analysis)
-            st.write(f"Processing time: {processing_time:.2f} seconds")
-            st.write("-------------------")
+                    # Generate analysis ID at the start of processing
+                    analysis_id = str(uuid.uuid4())[:8]
+                    
+                    # Create two columns for layout
+                    col1, col2 = st.columns([2, 1])
+
+                    with col1:
+                        st.subheader("Document Analysis")
+                        
+                        # First section: Key Terms Found
+                        with st.expander("Key Terms Found", expanded=True):
+                            text_lower = text.lower()
+                            
+                            # Create sections for different categories with their terms and titles
+                            categories = [
+                                (body_terms := [
+                                    # Hip specific terms
+                                    'hip', 'acetabul', 'femoral head', 'greater trochanter', 'femoroacetabular',
+                                    # Knee specific terms
+                                    'knee', 'patella', 'tibia', 'femur', 'meniscus'
+                                ], 
+                                "Body Part Terms"),
+                                (procedure_terms := [
+                                    # Hip arthroplasty terms
+                                    'hip replacement', 'hip arthroplasty', 'total hip', r'\btha\b',
+                                    # Knee arthroplasty terms
+                                    'knee replacement', 'knee arthroplasty', 'total knee', r'\btka\b',
+                                    # General arthroplasty terms
+                                    'arthroplasty', 'replacement',
+                                    # Hip soft tissue terms
+                                    'labral tear', 'hip impingement', 'trochanteric bursitis',
+                                    # Knee soft tissue terms
+                                    'meniscal tear', r'\bacl\b', r'\bmcl\b', r'\bpcl\b', r'\blcl\b'
+                                ], 
+                                "Procedure Terms"),
+                                (status_terms := [
+                                    'primary', 'revision', 'previous', 'failed', 'redo',
+                                    'first time', 'initial', 'prior surgery'
+                                ], 
+                                "Status Terms")
+                            ]
+                            
+                            # Display found terms with their context and categorization
+                            for terms, title in categories:
+                                matches = []
+                                for term in terms:
+                                    if term in text_lower:
+                                        start = max(0, text_lower.find(term) - 50)
+                                        end = min(len(text), text_lower.find(term) + len(term) + 50)
+                                        context = text[start:end].strip()
+                                        if not context.endswith('.'):
+                                            context += '...'
+                                        if not context.startswith('.'):
+                                            context = '...' + context
+                                        
+                                        # Add categorization for procedure terms
+                                        if title == "Procedure Terms":
+                                            if any(x in term for x in ['replacement', 'arthroplasty', 'tha', 'tka']):
+                                                term = f"{term} (Arthroplasty)"
+                                            else:
+                                                term = f"{term} (Soft Tissue)"
+                                        elif title == "Body Part Terms":
+                                            if any(x in term for x in ['hip', 'acetabul', 'femoral', 'trochanter']):
+                                                term = f"{term} (Hip)"
+                                            else:
+                                                term = f"{term} (Knee)"
+                                                
+                                        matches.append((term.capitalize(), context))
+                                
+                                if matches:
+                                    st.markdown(f"**{title}**")
+                                    for term, match in matches:
+                                        st.markdown(f"- **{term}**: '{match}'")
+                                    st.markdown("---")
+
+                        # Second section: Decision Logic
+                        with st.expander("Decision Logic", expanded=True):
+                            st.markdown("**Analysis Logic:**")
+                            
+                            # Enhanced body part detection
+                            primary_body_part = None
+                            clinical_evidence = None
+                            procedure_type = "Unknown"
+                            
+                            # Count meaningful mentions of each body part
+                            hip_indicators = {
+                                'hip pain': 0,
+                                'hip replacement': 0,
+                                'hip arthroplasty': 0,
+                                'hip oa': 0
+                            }
+                            
+                            knee_indicators = {
+                                'knee pain': 0,
+                                'knee replacement': 0,
+                                'knee arthroplasty': 0,
+                                'knee oa': 0
+                            }
+                            
+                            # Count meaningful mentions
+                            for indicator in hip_indicators:
+                                hip_indicators[indicator] = text_lower.count(indicator)
+                            
+                            for indicator in knee_indicators:
+                                knee_indicators[indicator] = text_lower.count(indicator)
+                            
+                            # Determine primary body part based on meaningful mentions
+                            hip_score = sum(hip_indicators.values())
+                            knee_score = sum(knee_indicators.values())
+                            
+                            # Add weight for specific procedure mentions
+                            if 'knee replacement' in text_lower:
+                                knee_score += 2
+                            if 'hip replacement' in text_lower:
+                                hip_score += 2
+                            
+                            primary_body_part = "Knee" if knee_score > hip_score else "Hip"
+                            
+                            st.markdown(f"- **Body Part:** {primary_body_part}")
+                            
+                            # Show evidence for body part determination
+                            if primary_body_part == "Knee":
+                                for indicator, count in knee_indicators.items():
+                                    if count > 0:
+                                        st.markdown(f"  - Found '{indicator}' {count} times")
+                            else:
+                                for indicator, count in hip_indicators.items():
+                                    if count > 0:
+                                        st.markdown(f"  - Found '{indicator}' {count} times")
+                            
+                            # Determine procedure type with enhanced detection
+                            arthroplasty_indicators = [
+                                'replacement', 'arthroplasty',
+                                'consideration for hip replacement',
+                                'consideration for knee replacement',
+                                'moderate oa', 'severe oa', 'advanced oa',
+                                'not coping', 'mobility seriously limited',
+                                'failed conservative', 'failed physio',
+                                'despite physiotherapy', 'in agony'
+                            ]
+                            
+                            if any(indicator in text_lower for indicator in arthroplasty_indicators):
+                                procedure_type = "Arthroplasty"
+                                # Find the matching indicator for evidence
+                                matching_indicator = next((indicator for indicator in arthroplasty_indicators if indicator in text_lower), None)
+                                if matching_indicator:
+                                    start = max(0, text_lower.find(matching_indicator) - 50)
+                                    end = min(len(text), text_lower.find(matching_indicator) + len(matching_indicator) + 50)
+                                    clinical_evidence = text[start:end].strip()
+                            
+                            st.markdown(f"- **Procedure Type:** {procedure_type}")
+                            if clinical_evidence:
+                                st.markdown(f"  - Evidence: '{clinical_evidence}'")
+                            
+                            # Determine pattern and intervention
+                            if procedure_type == "Arthroplasty":
+                                pattern = "degenerative joint disease"
+                                intervention = "arthroplasty"
+                            else:
+                                pattern = "unclear pathology"
+                                intervention = "further investigation needed"
+                            
+                            st.markdown("Based on the clinical picture:")
+                            st.markdown(f"- Pattern suggests {pattern}")
+                            
+                            # Show evidence that led to the decision
+                            if procedure_type == "Arthroplasty":
+                                st.markdown("Evidence for arthroplasty:")
+                                for indicator in arthroplasty_indicators:
+                                    if indicator in text_lower:
+                                        start = max(0, text_lower.find(indicator) - 50)
+                                        end = min(len(text), text_lower.find(indicator) + len(indicator) + 50)
+                                        context = text[start:end].strip()
+                                        st.markdown(f"  - Found '{indicator}' in context: '{context}'")
+                            
+                            st.markdown(f"- Most appropriate intervention would be {intervention}")
+                            
+                            # Analyze urgency
+                            urgency_indicators = [
+                                'in agony', 'severe pain', 'seriously limited',
+                                'not coping', 'failed conservative', 'despite treatment',
+                                'mobility seriously limited', 'unable to cope'
+                            ]
+                            
+                            is_urgent = any(indicator in text_lower for indicator in urgency_indicators)
+                            st.markdown(f"- Level of urgency: {'urgent' if is_urgent else 'routine'}")
+                            if is_urgent:
+                                for indicator in urgency_indicators:
+                                    if indicator in text_lower:
+                                        st.markdown(f"  - Found '{indicator}'")
+
+                    with col2:
+                        print("Starting Analysis Results section...")
+                        st.subheader("Analysis Results")
+                        if use_llama:
+                            print("Using Llama path...")
+                            llama_result = analyze_medical_referral_with_llama(text)
+                            
+                            # Create results data from Llama analysis
+                            results = {
+                                'Field': ['Procedure Type', 'Body Part'],
+                                'Value': [llama_result['procedure_type'], llama_result['body_part']]
+                            }
+                            
+                            if llama_result['procedure_type'] == "Arthroplasty":
+                                results['Field'].append('Arthroplasty')
+                                results['Value'].append(llama_result['arthroplasty'])
+                            
+                            results['Field'].append('Further Information Needed')
+                            results['Value'].append(llama_result['further_information_needed'])
+                        else:
+                            print("Using regular analysis path...")
+                            # Get the values from the previous analysis
+                            body_part = primary_body_part  # This was set in Decision Logic
+                            procedure_type = procedure_type  # This was set in Decision Logic
+                            
+                            # Create results data from the analysis
+                            analysis_result = analyze_medical_referral(text)
+                            
+                            if analysis_result.body_part not in ['hip', 'knee']:
+                                st.markdown("**This is not a hip nor knee referral letter**")
+                            else:
+                                results = {
+                                    'Field': ['Procedure Type', 'Body Part'],
+                                    'Value': [analysis_result.procedure_type.title(), analysis_result.body_part.title()]
+                                }
+                                
+                                if analysis_result.procedure_type == 'arthroplasty':
+                                    results['Field'].append('Arthroplasty')
+                                    results['Value'].append(analysis_result.arthroplasty.title())
+                                
+                                results['Field'].append('Further Information Needed')
+                                results['Value'].append(analysis_result.further_information_needed.title())
+                                
+                                # Create DataFrame and display
+                                df = pd.DataFrame(results)
+                                st.dataframe(df, hide_index=True)
+                        
+                        print(f"Analysis complete. ID: {analysis_id}")
+                        st.markdown(f"\nAnalysis ID: {analysis_id}")
+
+                except Exception as e:
+                    st.error(f"Error processing file: {str(e)}")
 
     st.write("Upload PDF files to analyze medical referrals.")
 
