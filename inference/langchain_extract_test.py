@@ -266,7 +266,7 @@ def save_analysis_changes(original_result, modified_result, analysis_id, filenam
             })
         
         df = pd.DataFrame(data)
-        csv_path = 'analysis_changes.csv'
+        csv_path = 'datasets/analysis_changes.csv'
         
         # Append to existing CSV or create new one
         if os.path.exists(csv_path):
@@ -280,7 +280,7 @@ def save_analysis_changes(original_result, modified_result, analysis_id, filenam
 
 def calculate_accuracy_metrics():
     """Calculate accuracy metrics from saved changes"""
-    if not os.path.exists('analysis_history.csv'):
+    if not os.path.exists('datasets/analysis_history.csv'):
         return {
             'total_analyzed': 0,
             'total_corrected': 0,
