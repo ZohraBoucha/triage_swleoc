@@ -90,7 +90,7 @@ http://localhost:8501
 ## 📁 Project Structure
 
 ```
-.
+
 ├── inference/
 │ └── deploy.py # Main application file
 ├── datasets/ # Created automatically for storing analysis data
