@@ -97,6 +97,11 @@ http://localhost:8501
 ├── inference/
 │ └── deploy.py             # Legacy application file
 ├── deploy_v2.py            # Current main application file
+├── config.py               # Configuration constants and data models
+├── text_extraction.py      # PDF text extraction and OCR functionality
+├── medical_analysis.py     # Medical referral analysis logic
+├── data_management.py      # Data saving and history management
+├── ui_components.py        # Streamlit UI components
 ├── datasets/               # Created automatically for storing analysis data
 ├── requirements.txt        # Project dependencies
 └── README.md
